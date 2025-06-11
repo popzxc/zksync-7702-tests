@@ -1,0 +1,17 @@
+[package]
+name = "zksync-7702-tests"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+alloy = "0.12.5"
+alloy-zksync = "0.12.5"
+anyhow = "1.0.98"
+async-trait = "0.1.88"
+thiserror = "2.0.12"
+tokio = { version = "1.45.1", features = ["full"] }
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
+
+e2e = "0.1.1"
+hex = "0.4.3"
