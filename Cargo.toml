@@ -13,5 +13,6 @@ tokio = { version = "1.45.1", features = ["full"] }
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
 
-e2e = "0.1.1"
+# e2e = "0.1.1"
+e2e = { package = "e2e", path = "../e2e/crates/e2e" }
 hex = "0.4.3"

@@ -1,4 +1,3 @@
-pub(crate) mod basic_eravm;
 pub(crate) mod basic_evm;
 
 #[derive(Debug)]

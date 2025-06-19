@@ -1,6 +1,7 @@
 use crate::suites::TestConfig;
 use tracing_subscriber::{layer::SubscriberExt as _, util::SubscriberInitExt as _};
 
+mod assertions;
 mod contracts;
 mod suites;
 mod utils;
@@ -30,8 +31,8 @@ async fn main() {
         main_pk: DEFAULT_PK.to_string(),
     };
     let mut tester = e2e::Tester::new(config);
-    tester.add_suite(suites::basic_evm::BasicEvmFlow::factory());
-    tester.add_suite(suites::basic_eravm::BasicEraVmFlow::factory());
+    tester.add_suite(suites::basic_evm::Test7702::evm());
+    tester.add_suite(suites::basic_evm::Test7702::eravm());
 
     if let Err(err) = tester.run().await {
         tracing::error!(err = ?err, "Test run failed");

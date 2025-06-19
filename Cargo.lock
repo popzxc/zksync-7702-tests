@@ -1284,23 +1284,20 @@ checksum = "92773504d58c093f6de2459af4af33faa518c13451eb8f2b5698ed3d36e7c813"
 
 [[package]]
 name = "e2e"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4e187ae54428e84c800b987b752089686d0f828442fb584e0aa8ab8255167ab0"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "async-trait",
  "console",
  "e2e-macro",
+ "futures",
  "thiserror",
  "tracing",
 ]
 
 [[package]]
 name = "e2e-macro"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ceddda7df9bfc41b40ed6858b5ee055d8e79f3ba28c01403ba792f5176db0b17"
+version = "0.1.2"
 dependencies = [
  "proc-macro2",
  "quote",

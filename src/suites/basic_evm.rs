@@ -1,4 +1,5 @@
 use crate::{
+    assertions::{AssertingProvider as _, DelegatingProvider as _, TxAssertion},
     contracts::{
         self,
         evm::{
@@ -13,8 +14,8 @@ use alloy::{
     network::{Ethereum, TransactionBuilder, TransactionBuilder7702},
     primitives::{Address, Bytes, U256, address, keccak256},
     providers::{DynProvider, Provider},
-    rpc::types::{Authorization, TransactionRequest},
-    signers::{SignerSync as _, local::PrivateKeySigner},
+    rpc::types::TransactionRequest,
+    signers::local::PrivateKeySigner,
     transports::RpcError,
 };
 
@@ -23,7 +24,7 @@ use e2e::test_suite;
 use super::TestConfig;
 
 #[derive(Debug, Clone)]
-pub(crate) struct BasicEvmFlow {
+pub(crate) struct Test7702 {
     deployer: Deployer,
     alice: PrivateKeySigner,
     evm_provider: DynProvider<Ethereum>,
@@ -34,13 +35,19 @@ pub(crate) struct BasicEvmFlow {
     checker: Evm7702CheckerInstance<(), DynProvider<Ethereum>>,
 }
 
-#[test_suite("Basic EVM flow")]
-impl BasicEvmFlow {
-    #[constructor]
-    async fn new(config: &TestConfig) -> anyhow::Result<Self> {
-        // let main_pk: PrivateKeySigner = config.main_pk.parse().unwrap();
+#[test_suite("EIP7702 tests")]
+impl Test7702 {
+    #[constructor("EVM")]
+    async fn evm(config: &TestConfig) -> anyhow::Result<Self> {
+        Self::new_inner(config, Deployer::Evm).await
+    }
 
-        let deployer = Deployer::Evm;
+    #[constructor("EraVM")]
+    async fn eravm(config: &TestConfig) -> anyhow::Result<Self> {
+        Self::new_inner(config, Deployer::EraVm).await
+    }
+
+    async fn new_inner(config: &TestConfig, deployer: Deployer) -> anyhow::Result<Self> {
         let alice = PrivateKeySigner::random();
 
         let evm_provider = alloy::providers::builder::<Ethereum>()
@@ -66,22 +73,24 @@ impl BasicEvmFlow {
         let erc20 = deployer
             .deploy_erc20(alice.clone(), &config.rpc_url)
             .await?;
-        erc20
-            .mint(U256::from(1000000), alice.address())
-            .send()
-            .await?
-            .watch()
+
+        evm_provider
+            .send_with_assertions(
+                erc20
+                    .mint(U256::from(1000000), alice.address())
+                    .into_transaction_request(),
+                [TxAssertion::should_succeed()],
+            )
             .await?;
 
         let simple_delegate_contract = deployer
             .deploy_simple_delegate_contract(alice.clone(), &config.rpc_url)
             .await?;
 
-        let delegation_target_evm = deployer
+        let delegation_target_evm = Deployer::Evm
             .deploy_delegation_target(alice.clone(), &config.rpc_url)
             .await?;
-        let delegation_target_eravm = deployer
-            .opposite()
+        let delegation_target_eravm = Deployer::EraVm
             .deploy_delegation_target(alice.clone(), &config.rpc_url)
             .await?;
 
@@ -102,28 +111,22 @@ impl BasicEvmFlow {
     #[test_case("Set authorization")]
     async fn set_authorization(&self) -> anyhow::Result<()> {
         tracing::info!("Setting auth to the deployed contract");
-        let auth = Authorization {
-            chain_id: U256::from(self.evm_provider.get_chain_id().await?),
-            address: *self.simple_delegate_contract.address(),
-            nonce: self
-                .evm_provider
-                .get_transaction_count(self.alice.address())
-                .await?
-                + 1, // Should use next nonce
-        };
-        let signature = self.alice.sign_hash_sync(&auth.signature_hash())?;
-        let signed_authorization = auth.into_signed(signature);
+
+        let auth = self
+            .evm_provider
+            .sign_authorization(
+                self.alice.address(),
+                &self.alice,
+                *self.simple_delegate_contract.address(),
+            )
+            .await?;
         let tx = TransactionRequest::default()
             .with_to(Address::default())
-            .with_authorization_list(vec![signed_authorization]);
-        let pending_tx = self.evm_provider.send_transaction(tx).await?;
-        tracing::info!("Submitted tx: {:?}", pending_tx.tx_hash());
-        let receipt = pending_tx.get_receipt().await?;
-        tracing::debug!(?receipt, "Transaction receipt received");
-        if !receipt.status() {
-            return Err(anyhow::anyhow!("Transaction failed: {:?}", receipt));
-        }
-        tracing::info!("Authorization set successfully");
+            .with_authorization_list(vec![auth]);
+
+        self.evm_provider
+            .send_with_assertions(tx, [TxAssertion::should_succeed()])
+            .await?;
         Ok(())
     }
 
@@ -255,22 +258,14 @@ impl BasicEvmFlow {
 
     #[test_case("Check msg.sender")]
     async fn check_msg_sender(&self) -> anyhow::Result<()> {
-        let execute_calldata = self
+        let tx = self
             .simple_delegate_contract
             .ensureMsgSender(self.alice.address())
-            .calldata()
-            .clone();
-        let tx = TransactionRequest::default()
-            .with_to(self.alice.address())
-            .with_input(execute_calldata);
-        let pending_tx = self.evm_provider.send_transaction(tx).await?;
-        tracing::info!("Submitted tx: {:?}", pending_tx.tx_hash());
-        let receipt = pending_tx.get_receipt().await?;
-        tracing::debug!(?receipt, "Transaction receipt received");
-        if !receipt.status() {
-            return Err(anyhow::anyhow!("Transaction failed: {:?}", receipt));
-        }
-
+            .into_transaction_request()
+            .with_to(self.alice.address());
+        self.evm_provider
+            .send_with_assertions(tx, [TxAssertion::should_succeed()])
+            .await?;
         Ok(())
     }
 
@@ -285,22 +280,16 @@ impl BasicEvmFlow {
             value: value_to_send,
             data: Default::default(),
         };
-        let execute_calldata = self
+        let tx = self
             .simple_delegate_contract
             .execute(vec![call])
-            .calldata()
-            .clone();
-        let tx = TransactionRequest::default()
+            .into_transaction_request()
             .with_to(self.alice.address())
-            .with_value(value_to_send)
-            .with_input(execute_calldata);
-        let pending_tx = self.evm_provider.send_transaction(tx).await?;
-        tracing::info!("Submitted tx: {:?}", pending_tx.tx_hash());
-        let receipt = pending_tx.get_receipt().await?;
-        tracing::debug!(?receipt, "Transaction receipt received");
-        if !receipt.status() {
-            return Err(anyhow::anyhow!("Transaction failed: {:?}", receipt));
-        }
+            .with_value(value_to_send);
+        self.evm_provider
+            .send_with_assertions(tx, [TxAssertion::should_succeed()])
+            .await?;
+
         let bob_balance = self.evm_provider.get_balance(bob_address).await?;
         if bob_balance < value_to_send {
             return Err(anyhow::anyhow!(
@@ -313,36 +302,26 @@ impl BasicEvmFlow {
 
     #[test_case("Fail transaction with revert")]
     async fn revert_processed(&self) -> anyhow::Result<()> {
-        let execute_calldata = self
+        let tx = self
             .simple_delegate_contract
             .triggerRevert()
-            .calldata()
-            .clone();
-        let tx = TransactionRequest::default()
+            .into_transaction_request()
             .with_to(self.alice.address())
-            .with_input(execute_calldata)
             .with_gas_limit(1_000_000);
-        let pending_tx = self.evm_provider.send_transaction(tx).await?;
-        tracing::info!("Submitted tx: {:?}", pending_tx.tx_hash());
-        let receipt = pending_tx.get_receipt().await?;
-        tracing::debug!(?receipt, "Transaction receipt received");
-        if receipt.status() {
-            return Err(anyhow::anyhow!("Transaction succeeded: {:?}", receipt));
-        }
+        self.evm_provider
+            .send_with_assertions(tx, [TxAssertion::should_revert()])
+            .await?;
 
         Ok(())
     }
 
     #[test_case("Revert reason in eth_call")]
     async fn revert_reason_in_eth_call(&self) -> anyhow::Result<()> {
-        let execute_calldata = self
+        let tx = self
             .simple_delegate_contract
             .triggerRevert()
-            .calldata()
-            .clone();
-        let tx = TransactionRequest::default()
+            .into_transaction_request()
             .with_to(self.alice.address())
-            .with_input(execute_calldata)
             .with_gas_limit(1_000_000);
         let call_result = self.evm_provider.call(tx).await;
         let Err(RpcError::ErrorResp(error)) = call_result else {
@@ -364,13 +343,14 @@ impl BasicEvmFlow {
         let bob_balance_before = self.erc20.balanceOf(bob).call().await?._0;
         tracing::info!("Bob's balance before: {:?}", bob_balance_before);
 
-        let pending_tx = self.erc20.transfer(bob, U256::from(500)).send().await?;
-        tracing::info!("Submitted tx: {:?}", pending_tx.tx_hash());
-        let receipt = pending_tx.get_receipt().await?;
-        tracing::debug!(?receipt, "Transaction receipt received");
-        if !receipt.status() {
-            return Err(anyhow::anyhow!("Transaction failed: {:?}", receipt));
-        }
+        self.evm_provider
+            .send_with_assertions(
+                self.erc20
+                    .transfer(bob, U256::from(500))
+                    .into_transaction_request(),
+                [TxAssertion::should_succeed()],
+            )
+            .await?;
 
         // Check that the balance has changed
         let bob_balance = self.erc20.balanceOf(bob).call().await?._0;
@@ -390,13 +370,9 @@ impl BasicEvmFlow {
         let tx = TransactionRequest::default()
             .with_to(bob)
             .with_value(U256::from(500));
-        let pending_tx = self.evm_provider.send_transaction(tx).await?;
-        tracing::info!("Submitted tx: {:?}", pending_tx.tx_hash());
-        let receipt = pending_tx.get_receipt().await?;
-        tracing::debug!(?receipt, "Transaction receipt received");
-        if !receipt.status() {
-            return Err(anyhow::anyhow!("Transaction failed: {:?}", receipt));
-        }
+        self.evm_provider
+            .send_with_assertions(tx, [TxAssertion::should_succeed()])
+            .await?;
 
         // Check that the balance has changed
         let bob_balance = self.evm_provider.get_balance(bob).await?;
@@ -422,45 +398,25 @@ impl BasicEvmFlow {
             value: Default::default(),
             data: contract.setValue(value_to_set).calldata().clone(),
         };
-        let execute_calldata = self
+        let tx = self
             .simple_delegate_contract
             .executeDelegate(vec![call])
-            .calldata()
-            .clone();
-        let tx = TransactionRequest::default()
-            .with_to(self.alice.address())
-            .with_input(execute_calldata);
-        let pending_tx = self.evm_provider.send_transaction(tx).await?;
-        tracing::info!("Submitted tx: {:?}", pending_tx.tx_hash());
-        let receipt = pending_tx.get_receipt().await?;
-        tracing::debug!(?receipt, "Transaction receipt received");
-        if !receipt.status() {
-            return Err(anyhow::anyhow!("Transaction failed: {:?}", receipt));
-        }
-
-        // Now do a call to check if the value was set correctly
-        let value = self
-            .evm_provider
-            .get_storage_at(self.alice.address(), U256::from(0))
+            .into_transaction_request()
+            .with_to(self.alice.address());
+        self.evm_provider
+            .send_with_assertions(
+                tx,
+                [
+                    TxAssertion::should_succeed(),
+                    TxAssertion::should_change_storage(
+                        self.alice.address(),
+                        U256::from(0),
+                        value_to_set,
+                    ),
+                    TxAssertion::should_change_storage(address, U256::from(0), U256::from(0)),
+                ],
+            )
             .await?;
-
-        anyhow::ensure!(
-            value == value_to_set,
-            "Value was not set correctly: expected {}, got {}",
-            value_to_set,
-            value
-        );
-
-        // Contract storage should be empty
-        let storage = self
-            .evm_provider
-            .get_storage_at(address, U256::from(0))
-            .await?;
-        anyhow::ensure!(
-            storage == U256::from(0),
-            "Storage at contract address is not empty: expected 0, got {}",
-            storage
-        );
 
         Ok(())
     }
@@ -478,22 +434,15 @@ impl BasicEvmFlow {
             value: Default::default(),
             data: contract.setValue(U256::from(42)).calldata().clone(),
         };
-        let execute_calldata = self
+        let tx = self
             .simple_delegate_contract
             .executeDelegate(vec![call])
-            .calldata()
-            .clone();
-        let tx = TransactionRequest::default()
+            .into_transaction_request()
             .with_to(self.alice.address())
-            .with_input(execute_calldata)
             .with_gas_limit(1_000_000);
-        let pending_tx = self.evm_provider.send_transaction(tx).await?;
-        tracing::info!("Submitted tx: {:?}", pending_tx.tx_hash());
-        let receipt = pending_tx.get_receipt().await?;
-        tracing::debug!(?receipt, "Transaction receipt received");
-        if receipt.status() {
-            return Err(anyhow::anyhow!("Transaction succeeded: {:?}", receipt));
-        }
+        self.evm_provider
+            .send_with_assertions(tx, [TxAssertion::should_revert()])
+            .await?;
 
         Ok(())
     }
@@ -509,29 +458,25 @@ impl BasicEvmFlow {
                 .calldata()
                 .clone(),
         };
-        let execute_calldata = self
+        let tx = self
             .simple_delegate_contract
             .executeDelegate(vec![call])
-            .calldata()
-            .clone();
-        let tx = TransactionRequest::default()
+            .into_transaction_request()
             .with_to(*self.simple_delegate_contract.address())
-            .with_input(execute_calldata)
             .with_gas_limit(1_000_000);
-        let pending_tx = self.evm_provider.send_transaction(tx).await?;
-        tracing::info!("Submitted tx: {:?}", pending_tx.tx_hash());
-        let receipt = pending_tx.get_receipt().await?;
-        tracing::debug!(?receipt, "Transaction receipt received");
-        if !receipt.status() {
-            return Err(anyhow::anyhow!("Transaction failed: {:?}", receipt));
-        }
-        if !receipt.logs().iter().any(|log| {
-            log.topics().first().map(|l| &l.as_slice()[..4]) == Some(&[0x39, 0x5a, 0x9a, 0xb3])
-        }) {
-            return Err(anyhow::anyhow!(
-                "Event for `TriggerSuccess` not found in logs"
-            ));
-        }
+        self.evm_provider
+            .send_with_assertions(
+                tx,
+                [
+                    TxAssertion::should_succeed(),
+                    TxAssertion::should_emit_log(|log| {
+                        // Signature for `TriggerSuccess` event.
+                        log.topics().first().map(|l| &l.as_slice()[..4])
+                            == Some(&[0x39, 0x5a, 0x9a, 0xb3])
+                    }),
+                ],
+            )
+            .await?;
 
         Ok(())
     }
@@ -547,22 +492,15 @@ impl BasicEvmFlow {
                 .calldata()
                 .clone(),
         };
-        let execute_calldata = self
+        let tx = self
             .simple_delegate_contract
             .executeDelegate(vec![call])
-            .calldata()
-            .clone();
-        let tx = TransactionRequest::default()
+            .into_transaction_request()
             .with_to(*self.simple_delegate_contract.address())
-            .with_input(execute_calldata)
             .with_gas_limit(1_000_000);
-        let pending_tx = self.evm_provider.send_transaction(tx).await?;
-        tracing::info!("Submitted tx: {:?}", pending_tx.tx_hash());
-        let receipt = pending_tx.get_receipt().await?;
-        tracing::debug!(?receipt, "Transaction receipt received");
-        if receipt.status() {
-            return Err(anyhow::anyhow!("Transaction succeeded: {:?}", receipt));
-        }
+        self.evm_provider
+            .send_with_assertions(tx, [TxAssertion::should_revert()])
+            .await?;
 
         Ok(())
     }
@@ -578,22 +516,15 @@ impl BasicEvmFlow {
                 .calldata()
                 .clone(),
         };
-        let execute_calldata = self
+        let tx = self
             .simple_delegate_contract
             .executeStatic(vec![call])
-            .calldata()
-            .clone();
-        let tx = TransactionRequest::default()
+            .into_transaction_request()
             .with_to(*self.simple_delegate_contract.address())
-            .with_input(execute_calldata)
             .with_gas_limit(1_000_000);
-        let pending_tx = self.evm_provider.send_transaction(tx).await?;
-        tracing::info!("Submitted tx: {:?}", pending_tx.tx_hash());
-        let receipt = pending_tx.get_receipt().await?;
-        tracing::debug!(?receipt, "Transaction receipt received");
-        if !receipt.status() {
-            return Err(anyhow::anyhow!("Transaction failed: {:?}", receipt));
-        }
+        self.evm_provider
+            .send_with_assertions(tx, [TxAssertion::should_succeed()])
+            .await?;
 
         Ok(())
     }
@@ -609,49 +540,33 @@ impl BasicEvmFlow {
                 .calldata()
                 .clone(),
         };
-        let execute_calldata = self
+        let tx = self
             .simple_delegate_contract
             .executeStatic(vec![call])
-            .calldata()
-            .clone();
-        let tx = TransactionRequest::default()
+            .into_transaction_request()
             .with_to(*self.simple_delegate_contract.address())
-            .with_input(execute_calldata)
             .with_gas_limit(1_000_000);
-        let pending_tx = self.evm_provider.send_transaction(tx).await?;
-        tracing::info!("Submitted tx: {:?}", pending_tx.tx_hash());
-        let receipt = pending_tx.get_receipt().await?;
-        tracing::debug!(?receipt, "Transaction receipt received");
-        if receipt.status() {
-            return Err(anyhow::anyhow!("Transaction succeeded: {:?}", receipt));
-        }
+        self.evm_provider
+            .send_with_assertions(tx, [TxAssertion::should_revert()])
+            .await?;
 
         Ok(())
     }
 
     #[test_case("Reset authorization")]
     async fn reset_authorization(&self) -> anyhow::Result<()> {
-        let auth = Authorization {
-            chain_id: U256::from(self.evm_provider.get_chain_id().await?),
-            address: Address::default(), // Resetting to default address
-            nonce: self
-                .evm_provider
-                .get_transaction_count(self.alice.address())
-                .await?
-                + 1, // Should use next nonce
-        };
-        let signature = self.alice.sign_hash_sync(&auth.signature_hash())?;
-        let signed_authorization = auth.into_signed(signature);
+        // Resetting to default address
+        let auth = self
+            .evm_provider
+            .sign_authorization(self.alice.address(), &self.alice, Address::default())
+            .await?;
         let tx = TransactionRequest::default()
             .with_to(Address::default())
-            .with_authorization_list(vec![signed_authorization]);
-        let pending_tx = self.evm_provider.send_transaction(tx).await?;
-        tracing::info!("Submitted tx: {:?}", pending_tx.tx_hash());
-        let receipt = pending_tx.get_receipt().await?;
-        tracing::debug!(?receipt, "Transaction receipt received");
-        if !receipt.status() {
-            return Err(anyhow::anyhow!("Transaction failed: {:?}", receipt));
-        }
+            .with_authorization_list(vec![auth]);
+        self.evm_provider
+            .send_with_assertions(tx, [TxAssertion::should_succeed()])
+            .await?;
+
         let code = self.evm_provider.get_code_at(self.alice.address()).await?;
         anyhow::ensure!(
             code.to_string() == "0x",
@@ -770,23 +685,16 @@ impl BasicEvmFlow {
     async fn set_authorization_in_a_reverting_tx(&self) -> anyhow::Result<()> {
         let delegation_address = Address::repeat_byte(0x3f);
 
-        let auth_list_nonce = self
+        let auth = self
             .evm_provider
-            .get_transaction_count(self.alice.address())
-            .await?
-            + 1; // Should use next nonce
-        let auth = Authorization {
-            chain_id: U256::from(self.evm_provider.get_chain_id().await?),
-            address: delegation_address,
-            nonce: auth_list_nonce,
-        };
-        let signature = self.alice.sign_hash_sync(&auth.signature_hash())?;
-        let signed_authorization = auth.into_signed(signature);
+            .sign_authorization(self.alice.address(), &self.alice, delegation_address)
+            .await?;
+        let auth_list_nonce = auth.inner().nonce;
 
         // Transaction should revert, but authorization should be set.
         let tx = TransactionRequest::default()
             .with_to(*self.simple_delegate_contract.address())
-            .with_authorization_list(vec![signed_authorization])
+            .with_authorization_list(vec![auth])
             .with_input(
                 self.simple_delegate_contract
                     .triggerRevert()
@@ -794,12 +702,9 @@ impl BasicEvmFlow {
                     .clone(),
             )
             .with_gas_limit(1_000_000);
-        let pending_tx = self.evm_provider.send_transaction(tx).await?;
-        tracing::info!("Submitted tx: {:?}", pending_tx.tx_hash());
-        let receipt = pending_tx.get_receipt().await?;
-        if receipt.status() {
-            return Err(anyhow::anyhow!("Transaction suceeded: {:?}", receipt));
-        }
+        self.evm_provider
+            .send_with_assertions(tx, [TxAssertion::should_revert()])
+            .await?;
 
         let account_code_storage =
             crate::contracts::era_vm::contract_deployer(self.evm_provider.clone());
@@ -833,62 +738,35 @@ impl BasicEvmFlow {
         let bob = PrivateKeySigner::random();
         let charlie = PrivateKeySigner::random();
 
-        let bob_authorization = Authorization {
-            chain_id: U256::from(self.evm_provider.get_chain_id().await?),
-            address: charlie.address(),
-            nonce: 0,
-        };
-        let bob_signature = bob.sign_hash_sync(&bob_authorization.signature_hash())?;
-        let charlie_authorization = Authorization {
-            chain_id: U256::from(self.evm_provider.get_chain_id().await?),
-            address: bob.address(),
-            nonce: 0,
-        };
-        let charlie_signature = charlie.sign_hash_sync(&charlie_authorization.signature_hash())?;
+        let bob_auth = self
+            .evm_provider
+            .sign_authorization(self.alice.address(), &bob, charlie.address())
+            .await?;
+        let charlie_auth = self
+            .evm_provider
+            .sign_authorization(self.alice.address(), &charlie, bob.address())
+            .await?;
 
         let tx = TransactionRequest::default()
             .with_to(Address::default())
-            .with_authorization_list(vec![
-                bob_authorization.into_signed(bob_signature),
-                charlie_authorization.into_signed(charlie_signature),
-            ]);
-        let pending_tx = self.evm_provider.send_transaction(tx).await?;
-        tracing::info!("Submitted tx: {:?}", pending_tx.tx_hash());
-        let receipt = pending_tx.get_receipt().await?;
-        if !receipt.status() {
-            return Err(anyhow::anyhow!("Transaction failed: {:?}", receipt));
-        }
+            .with_authorization_list(vec![bob_auth, charlie_auth]);
+        self.evm_provider
+            .send_with_assertions(tx, [TxAssertion::should_succeed()])
+            .await?;
 
         let invoke_bob_tx = TransactionRequest::default()
             .with_to(bob.address())
             .with_gas_limit(1_000_000);
+        self.evm_provider
+            .send_with_assertions(invoke_bob_tx, [TxAssertion::should_revert()])
+            .await?;
+
         let invoke_charlie_tx = TransactionRequest::default()
             .with_to(charlie.address())
             .with_gas_limit(1_000_000);
-
-        let bob_pending_tx = self.evm_provider.send_transaction(invoke_bob_tx).await?;
-        tracing::info!("Submitted Bob's tx: {:?}", bob_pending_tx.tx_hash());
-        let bob_receipt = bob_pending_tx.get_receipt().await?;
-        if bob_receipt.status() {
-            return Err(anyhow::anyhow!(
-                "Bob's transaction succeeded: {:?}",
-                bob_receipt
-            ));
-        }
-
-        let charlie_pending_tx = self
-            .evm_provider
-            .send_transaction(invoke_charlie_tx)
+        self.evm_provider
+            .send_with_assertions(invoke_charlie_tx, [TxAssertion::should_revert()])
             .await?;
-        tracing::info!("Submitted Charlie's tx: {:?}", charlie_pending_tx.tx_hash());
-        let charlie_receipt = charlie_pending_tx.get_receipt().await?;
-        tracing::debug!(?charlie_receipt, "Charlie's transaction receipt received");
-        if charlie_receipt.status() {
-            return Err(anyhow::anyhow!(
-                "Charlie's transaction succeeded: {:?}",
-                charlie_receipt
-            ));
-        }
 
         Ok(())
     }
@@ -920,27 +798,19 @@ impl BasicEvmFlow {
     async fn auth_lists_preserved_on_out_of_gas(&self) -> anyhow::Result<()> {
         let bob = PrivateKeySigner::random();
         let charlie = PrivateKeySigner::random();
-        let bob_authorization = Authorization {
-            chain_id: U256::from(self.evm_provider.get_chain_id().await?),
-            address: charlie.address(),
-            nonce: 0,
-        };
-        let bob_signature = bob.sign_hash_sync(&bob_authorization.signature_hash())?;
+        let bob_auth = self
+            .evm_provider
+            .sign_authorization(self.alice.address(), &bob, charlie.address())
+            .await?;
 
         let tx = TransactionRequest::default()
             .with_to(*self.checker.address())
             .with_input(self.checker.spendAllGas().calldata().clone())
-            .with_authorization_list(vec![bob_authorization.into_signed(bob_signature)])
+            .with_authorization_list(vec![bob_auth])
             .with_gas_limit(2_000_000); // Transaction can't be estimated.
-        let pending_tx = self.evm_provider.send_transaction(tx).await?;
-        tracing::info!("Submitted tx: {:?}", pending_tx.tx_hash());
-        let receipt = pending_tx.get_receipt().await?;
-        if receipt.status() {
-            return Err(anyhow::anyhow!(
-                "Transaction succeeded (should've spent all gas): {:?}",
-                receipt
-            ));
-        }
+        self.evm_provider
+            .send_with_assertions(tx, [TxAssertion::should_revert()])
+            .await?;
 
         let account_code_storage =
             crate::contracts::era_vm::contract_deployer(self.evm_provider.clone());
@@ -973,31 +843,22 @@ impl BasicEvmFlow {
     async fn delegate_to_precompile(&self) -> anyhow::Result<()> {
         let precompile_address = address!("0x0000000000000000000000000000000000000001");
         let bob = PrivateKeySigner::random();
-        let bob_authorization = Authorization {
-            chain_id: U256::from(self.evm_provider.get_chain_id().await?),
-            address: precompile_address,
-            nonce: 0,
-        };
-        let bob_signature = bob.sign_hash_sync(&bob_authorization.signature_hash())?;
+        let bob_auth = self
+            .evm_provider
+            .sign_authorization(self.alice.address(), &bob, precompile_address)
+            .await?;
+
         let tx = TransactionRequest::default()
             .with_to(Default::default())
-            .with_authorization_list(vec![bob_authorization.into_signed(bob_signature)]);
-        let pending_tx = self.evm_provider.send_transaction(tx).await?;
-        tracing::info!("Submitted tx: {:?}", pending_tx.tx_hash());
-        let receipt = pending_tx.get_receipt().await?;
-        tracing::debug!(?receipt, "Transaction receipt received");
-        if !receipt.status() {
-            return Err(anyhow::anyhow!("Transaction failed: {:?}", receipt));
-        }
+            .with_authorization_list(vec![bob_auth]);
+        self.evm_provider
+            .send_with_assertions(tx, [TxAssertion::should_succeed()])
+            .await?;
 
         let call_precompile = TransactionRequest::default().with_to(bob.address());
-        let pending_tx = self.evm_provider.send_transaction(call_precompile).await?;
-        tracing::info!("Submitted precompile call tx: {:?}", pending_tx.tx_hash());
-        let receipt = pending_tx.get_receipt().await?;
-        tracing::debug!(?receipt, "Precompile call receipt received");
-        if !receipt.status() {
-            return Err(anyhow::anyhow!("Precompile call failed: {:?}", receipt));
-        }
+        self.evm_provider
+            .send_with_assertions(call_precompile, [TxAssertion::should_succeed()])
+            .await?;
         Ok(())
     }
 }

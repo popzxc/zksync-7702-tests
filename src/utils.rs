@@ -18,13 +18,6 @@ pub(crate) enum Deployer {
 }
 
 impl Deployer {
-    pub fn opposite(self) -> Self {
-        match self {
-            Deployer::Evm => Deployer::EraVm,
-            Deployer::EraVm => Deployer::Evm,
-        }
-    }
-
     pub async fn deploy_erc20(
         self,
         pk: PrivateKeySigner,
