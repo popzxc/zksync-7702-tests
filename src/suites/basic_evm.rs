@@ -1,5 +1,5 @@
 use crate::{
-    assertions::{AssertingProvider as _, DelegatingProvider as _, TxAssertion},
+    assertions::{AssertingProvider as _, DelegatingProvider as _, Token, TxAssertion},
     contracts::{
         self,
         evm::{
@@ -11,11 +11,12 @@ use crate::{
     utils::Deployer,
 };
 use alloy::{
+    eips::eip7702::SignedAuthorization,
     network::{Ethereum, TransactionBuilder, TransactionBuilder7702},
     primitives::{Address, Bytes, U256, address, keccak256},
     providers::{DynProvider, Provider},
     rpc::types::TransactionRequest,
-    signers::local::PrivateKeySigner,
+    signers::{Signer, local::PrivateKeySigner},
     transports::RpcError,
 };
 
@@ -114,18 +115,21 @@ impl Test7702 {
 
         let auth = self
             .evm_provider
-            .sign_authorization(
-                self.alice.address(),
-                &self.alice,
-                *self.simple_delegate_contract.address(),
-            )
+            .sign_authorization(1, &self.alice, *self.simple_delegate_contract.address())
             .await?;
         let tx = TransactionRequest::default()
             .with_to(Address::default())
             .with_authorization_list(vec![auth]);
 
         self.evm_provider
-            .send_with_assertions(tx, [TxAssertion::should_succeed()])
+            .send_with_assertions(
+                tx,
+                [
+                    TxAssertion::should_succeed(),
+                    // Has to be incremented by 2: 1 for tx, 1 for authorization
+                    TxAssertion::should_increment_nonce(self.alice.address(), 2),
+                ],
+            )
             .await?;
         Ok(())
     }
@@ -273,10 +277,10 @@ impl Test7702 {
     async fn send_operation(&self) -> anyhow::Result<()> {
         tracing::info!("Sending operation...");
 
-        let bob_address = Address::repeat_byte(0x5c);
+        let bob = Address::repeat_byte(0x5c);
         let value_to_send = U256::from(1000);
         let call = contracts::evm::SimpleDelegateContract::Call {
-            to: bob_address,
+            to: bob,
             value: value_to_send,
             data: Default::default(),
         };
@@ -287,15 +291,14 @@ impl Test7702 {
             .with_to(self.alice.address())
             .with_value(value_to_send);
         self.evm_provider
-            .send_with_assertions(tx, [TxAssertion::should_succeed()])
+            .send_with_assertions(
+                tx,
+                [
+                    TxAssertion::should_succeed(),
+                    TxAssertion::should_change_balance(bob, Token::Base, "1000".parse().unwrap()),
+                ],
+            )
             .await?;
-
-        let bob_balance = self.evm_provider.get_balance(bob_address).await?;
-        if bob_balance < value_to_send {
-            return Err(anyhow::anyhow!(
-                "Bob's balance is less than expected: {bob_balance}, expected: {value_to_send}"
-            ));
-        }
 
         Ok(())
     }
@@ -340,24 +343,22 @@ impl Test7702 {
     async fn use_eoa(&self) -> anyhow::Result<()> {
         let bob = Address::repeat_byte(0x66);
         tracing::info!("Checking if EOA can still be used for contract invocation");
-        let bob_balance_before = self.erc20.balanceOf(bob).call().await?._0;
-        tracing::info!("Bob's balance before: {:?}", bob_balance_before);
 
         self.evm_provider
             .send_with_assertions(
                 self.erc20
                     .transfer(bob, U256::from(500))
                     .into_transaction_request(),
-                [TxAssertion::should_succeed()],
+                [
+                    TxAssertion::should_succeed(),
+                    TxAssertion::should_change_balance(
+                        bob,
+                        Token::Erc20(*self.erc20.address()),
+                        "500".parse().unwrap(),
+                    ),
+                ],
             )
             .await?;
-
-        // Check that the balance has changed
-        let bob_balance = self.erc20.balanceOf(bob).call().await?._0;
-        anyhow::ensure!(
-            bob_balance - bob_balance_before == U256::from(500),
-            "Bob's balance did not increase as expected"
-        );
 
         Ok(())
     }
@@ -365,21 +366,19 @@ impl Test7702 {
     #[test_case("Can still use as an EOA (with value)")]
     async fn use_eoa_with_value(&self) -> anyhow::Result<()> {
         let bob = Address::repeat_byte(0x5d);
-        let bob_balance_before = self.evm_provider.get_balance(bob).await?;
 
         let tx = TransactionRequest::default()
             .with_to(bob)
             .with_value(U256::from(500));
         self.evm_provider
-            .send_with_assertions(tx, [TxAssertion::should_succeed()])
+            .send_with_assertions(
+                tx,
+                [
+                    TxAssertion::should_succeed(),
+                    TxAssertion::should_change_balance(bob, Token::Base, "500".parse().unwrap()),
+                ],
+            )
             .await?;
-
-        // Check that the balance has changed
-        let bob_balance = self.evm_provider.get_balance(bob).await?;
-        anyhow::ensure!(
-            bob_balance - bob_balance_before == U256::from(500),
-            "Bob's balance did not increase as expected"
-        );
 
         Ok(())
     }
@@ -558,7 +557,7 @@ impl Test7702 {
         // Resetting to default address
         let auth = self
             .evm_provider
-            .sign_authorization(self.alice.address(), &self.alice, Address::default())
+            .sign_authorization(1, &self.alice, Address::default())
             .await?;
         let tx = TransactionRequest::default()
             .with_to(Address::default())
@@ -687,7 +686,7 @@ impl Test7702 {
 
         let auth = self
             .evm_provider
-            .sign_authorization(self.alice.address(), &self.alice, delegation_address)
+            .sign_authorization(1, &self.alice, delegation_address)
             .await?;
         let auth_list_nonce = auth.inner().nonce;
 
@@ -740,11 +739,11 @@ impl Test7702 {
 
         let bob_auth = self
             .evm_provider
-            .sign_authorization(self.alice.address(), &bob, charlie.address())
+            .sign_authorization(0, &bob, charlie.address())
             .await?;
         let charlie_auth = self
             .evm_provider
-            .sign_authorization(self.alice.address(), &charlie, bob.address())
+            .sign_authorization(0, &charlie, bob.address())
             .await?;
 
         let tx = TransactionRequest::default()
@@ -800,7 +799,7 @@ impl Test7702 {
         let charlie = PrivateKeySigner::random();
         let bob_auth = self
             .evm_provider
-            .sign_authorization(self.alice.address(), &bob, charlie.address())
+            .sign_authorization(0, &bob, charlie.address())
             .await?;
 
         let tx = TransactionRequest::default()
@@ -845,7 +844,7 @@ impl Test7702 {
         let bob = PrivateKeySigner::random();
         let bob_auth = self
             .evm_provider
-            .sign_authorization(self.alice.address(), &bob, precompile_address)
+            .sign_authorization(0, &bob, precompile_address)
             .await?;
 
         let tx = TransactionRequest::default()
@@ -859,6 +858,99 @@ impl Test7702 {
         self.evm_provider
             .send_with_assertions(call_precompile, [TxAssertion::should_succeed()])
             .await?;
+        Ok(())
+    }
+
+    #[test_case("Set multiple authorizations, ignore invalid")]
+    async fn set_multiple_authorizations(&self) -> anyhow::Result<()> {
+        let bob = PrivateKeySigner::random();
+        let carl = PrivateKeySigner::random();
+        let daisy = PrivateKeySigner::random();
+
+        let auth_bob = self
+            .evm_provider
+            .sign_authorization(0, &bob, Address::repeat_byte(0x11))
+            .await?;
+        let auth_carl = self
+            .evm_provider
+            .sign_authorization(0, &carl, Address::repeat_byte(0x11))
+            .await?;
+        let auth_invalid = {
+            let auth = self
+                .evm_provider
+                .sign_authorization(0, &daisy, Address::repeat_byte(0x11))
+                .await?;
+            // Authorization tuple with invalid signature
+            SignedAuthorization::new_unchecked(
+                auth.strip_signature(),
+                0,
+                U256::from(123),
+                U256::from(456),
+            )
+        };
+
+        let tx = TransactionRequest::default()
+            .with_to(Address::default())
+            .with_authorization_list(vec![auth_bob, auth_carl, auth_invalid]);
+
+        self.evm_provider
+            .send_with_assertions(
+                tx,
+                [
+                    TxAssertion::should_succeed(),
+                    TxAssertion::should_increment_nonce(self.alice.address(), 1),
+                    TxAssertion::should_increment_nonce(bob.address(), 1),
+                    TxAssertion::should_increment_nonce(carl.address(), 1),
+                    TxAssertion::should_not_increment_nonce(daisy.address()),
+                ],
+            )
+            .await?;
+        Ok(())
+    }
+
+    #[test_case("Handle multiple tuples for the same authority")]
+    async fn many_same_account_authorizations(&self) -> anyhow::Result<()> {
+        // From EIP: When multiple tuples from the same authority are present,
+        // set the code using the address in the last valid occurrence.
+
+        let bob = PrivateKeySigner::random();
+        let first_auth = self
+            .evm_provider
+            .sign_authorization(0, &bob, Address::repeat_byte(0x11))
+            .await?;
+        let second_auth = self
+            .evm_provider
+            .sign_authorization(1, &bob, Address::repeat_byte(0x22))
+            .await?;
+        // This auth should be skipped, because it uses the wrong nonce
+        let skipped_auth = self
+            .evm_provider
+            .sign_authorization(3, &bob, Address::repeat_byte(0x33))
+            .await?;
+        let tx = TransactionRequest::default()
+            .with_to(Address::default())
+            .with_authorization_list(vec![first_auth, second_auth, skipped_auth]);
+        self.evm_provider
+            .send_with_assertions(
+                tx,
+                [
+                    TxAssertion::should_succeed(),
+                    // Nonce has to be incremented twice, for the first 2 tuples
+                    TxAssertion::should_increment_nonce(bob.address(), 2),
+                ],
+            )
+            .await?;
+
+        // Check that the second auth tuple got accepted by checking code
+        let code = self.evm_provider.get_code_at(bob.address()).await?;
+        let expected_code = format!("0xef0100{:x}", Address::repeat_byte(0x22));
+        anyhow::ensure!(
+            code.to_string() == expected_code,
+            "Code does not match expected: {} != {}",
+            code.to_string(),
+            expected_code
+        );
+
         Ok(())
     }
 }
