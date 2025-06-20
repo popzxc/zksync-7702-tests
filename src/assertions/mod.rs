@@ -12,8 +12,11 @@ use anyhow::Context as _;
 mod should_change_balance;
 mod should_change_storage;
 mod should_emit_log;
+mod should_increment_nonce;
 mod should_revert;
 mod should_succeed;
+
+pub use should_change_balance::Token;
 
 #[derive(Debug)]
 pub struct TxAssertion(Box<dyn Assertion>);
@@ -119,7 +122,7 @@ impl<P: Provider<Ethereum> + Send + Sync + 'static> AssertingProvider for P {}
 pub trait DelegatingProvider: Provider<Ethereum> + Sized {
     async fn sign_authorization(
         &self,
-        from: Address,
+        nonce_increment: u64,
         delegated: &PrivateKeySigner,
         delegate_to: Address,
     ) -> anyhow::Result<SignedAuthorization> {
@@ -129,13 +132,11 @@ pub trait DelegatingProvider: Provider<Ethereum> + Sized {
                 .context("Unable to get chain ID for signing authorization")?,
         );
 
-        let mut nonce = self
+        let nonce = self
             .get_transaction_count(delegated.address())
             .await
-            .context("Unable to get nonce for signing authorization")?;
-        if from == delegated.address() {
-            nonce += 1; // Should use next nonce
-        }
+            .context("Unable to get nonce for signing authorization")?
+            + nonce_increment;
 
         let auth = Authorization {
             chain_id,
