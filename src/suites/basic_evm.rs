@@ -20,6 +20,7 @@ use alloy::{
     transports::RpcError,
 };
 
+use anyhow::Context as _;
 use e2e::test_suite;
 
 use super::TestConfig;
@@ -73,7 +74,8 @@ impl Test7702 {
 
         let erc20 = deployer
             .deploy_erc20(alice.clone(), &config.rpc_url)
-            .await?;
+            .await
+            .context("Can't deploy ERC20")?;
 
         evm_provider
             .send_with_assertions(
@@ -86,16 +88,21 @@ impl Test7702 {
 
         let simple_delegate_contract = deployer
             .deploy_simple_delegate_contract(alice.clone(), &config.rpc_url)
-            .await?;
+            .await
+            .context("Can't deploy simple delegate contract")?;
 
         let delegation_target_evm = Deployer::Evm
             .deploy_delegation_target(alice.clone(), &config.rpc_url)
-            .await?;
+            .await
+            .context("Can't deploy simple delegate target (EVM)")?;
         let delegation_target_eravm = Deployer::EraVm
             .deploy_delegation_target(alice.clone(), &config.rpc_url)
-            .await?;
+            .await
+            .context("Can't deploy simple delegate target (EraVM)")?;
 
-        let checker = contracts::evm::Evm7702Checker::deploy(evm_provider.clone()).await?;
+        let checker = contracts::evm::Evm7702Checker::deploy(evm_provider.clone())
+            .await
+            .context("Can't deploy Evm7702Checker")?;
 
         Ok(Self {
             deployer,
@@ -178,7 +185,7 @@ impl Test7702 {
             .codeHash;
         let mut expected_bytecode_hash = [0u8; 32];
         expected_bytecode_hash[0..12]
-            .copy_from_slice(&hex::decode("020200170000000000EF0100").unwrap());
+            .copy_from_slice(&hex::decode("030200170000000000EF0100").unwrap());
         expected_bytecode_hash[12..32].copy_from_slice(delegation_address.as_slice());
         anyhow::ensure!(
             versioned_bytecode_hash == expected_bytecode_hash,
