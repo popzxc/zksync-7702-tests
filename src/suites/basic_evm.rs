@@ -616,7 +616,7 @@ impl Test7702 {
 
         let mut expected_bytecode_hash = [0u8; 32];
         expected_bytecode_hash[0..12]
-            .copy_from_slice(&hex::decode("020200170000000000EF0100").unwrap());
+            .copy_from_slice(&hex::decode("030200170000000000EF0100").unwrap());
         expected_bytecode_hash[12..32].copy_from_slice(delegation_address.as_slice());
         let evm_hashes_storage =
             crate::contracts::era_vm::evm_hashes_storage(self.evm_provider.clone());
