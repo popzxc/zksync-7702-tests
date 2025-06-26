@@ -7,9 +7,53 @@ use crate::contracts::{
 };
 use alloy::{
     network::{Ethereum, ReceiptResponse},
+    primitives::{Address, U256},
     providers::{DynProvider, Provider},
     signers::local::PrivateKeySigner,
 };
+use alloy_zksync::provider::L1CommunicationError;
+use anyhow::Context as _;
+
+pub async fn deposit_base_token(
+    pk: PrivateKeySigner,
+    l1_url: &str,
+    l2_url: &str,
+    to: Address,
+    amount: U256,
+) -> anyhow::Result<()> {
+    use alloy_zksync::provider::ZksyncProviderWithWallet;
+
+    let evm_provider = alloy::providers::builder::<Ethereum>()
+        .with_recommended_fillers()
+        .wallet(pk.clone())
+        .on_http(l1_url.parse().unwrap())
+        .erased();
+
+    let zksync_wallet = alloy_zksync::wallet::ZksyncWallet::from(pk);
+    let zksync_provider = alloy_zksync::provider::zksync_provider()
+        .with_recommended_fillers()
+        .wallet(zksync_wallet)
+        .on_http(l2_url.parse().unwrap());
+
+    let deposit_request = alloy_zksync::provider::DepositRequest::new(amount).with_receiver(to);
+    let deposit_tx = zksync_provider
+        .deposit(&deposit_request, &evm_provider)
+        .await
+        .map_err(|err| match err {
+            L1CommunicationError::Custom(err) => anyhow::anyhow!(err),
+            L1CommunicationError::NewPriorityRequestLogNotFound => {
+                anyhow::anyhow!("New priority request log not found")
+            }
+        })
+        .context("L1 request failed")?;
+    deposit_tx
+        .get_l2_tx()
+        .context("Getting L2 tx failed")?
+        .watch()
+        .await
+        .context("Deposit failed")?;
+    Ok(())
+}
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Deployer {

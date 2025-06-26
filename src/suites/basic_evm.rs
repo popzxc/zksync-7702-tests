@@ -55,25 +55,38 @@ impl Test7702 {
         let evm_provider = alloy::providers::builder::<Ethereum>()
             .with_recommended_fillers()
             .wallet(alice.clone())
-            .on_http(config.rpc_url.parse().unwrap())
+            .on_http(config.l2_url.parse().unwrap())
             .erased();
 
-        let _res: bool = evm_provider
-            .raw_request(
-                "anvil_setBalance".into(),
-                [
-                    alice.address().to_string(),
-                    "0x100000000000000000000".to_string(), // 100 ETH in wei
-                ],
+        if let Some(l1_url) = &config.l1_url {
+            crate::utils::deposit_base_token(
+                config.main_pk.parse().unwrap(),
+                l1_url,
+                &config.l2_url,
+                alice.address(),
+                U256::from(100000000000000000000u128),
             )
-            .await?;
+            .await
+            .context("Failed to deposit base token for Alice")?;
+        } else {
+            evm_provider
+                .raw_request::<_, bool>(
+                    "anvil_setBalance".into(),
+                    [
+                        alice.address().to_string(),
+                        "0x100000000000000000000".to_string(), // 100 ETH in wei
+                    ],
+                )
+                .await?;
+        }
+
         anyhow::ensure!(
             evm_provider.get_balance(alice.address()).await? > U256::from(0),
             "Alice's balance should be greater than 0",
         );
 
         let erc20 = deployer
-            .deploy_erc20(alice.clone(), &config.rpc_url)
+            .deploy_erc20(alice.clone(), &config.l2_url)
             .await
             .context("Can't deploy ERC20")?;
 
@@ -87,16 +100,16 @@ impl Test7702 {
             .await?;
 
         let simple_delegate_contract = deployer
-            .deploy_simple_delegate_contract(alice.clone(), &config.rpc_url)
+            .deploy_simple_delegate_contract(alice.clone(), &config.l2_url)
             .await
             .context("Can't deploy simple delegate contract")?;
 
         let delegation_target_evm = Deployer::Evm
-            .deploy_delegation_target(alice.clone(), &config.rpc_url)
+            .deploy_delegation_target(alice.clone(), &config.l2_url)
             .await
             .context("Can't deploy simple delegate target (EVM)")?;
         let delegation_target_eravm = Deployer::EraVm
-            .deploy_delegation_target(alice.clone(), &config.rpc_url)
+            .deploy_delegation_target(alice.clone(), &config.l2_url)
             .await
             .context("Can't deploy simple delegate target (EraVM)")?;
 
