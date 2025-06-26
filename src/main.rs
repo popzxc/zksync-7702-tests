@@ -1,13 +1,11 @@
 use crate::suites::TestConfig;
+use clap::Parser;
 use tracing_subscriber::{layer::SubscriberExt as _, util::SubscriberInitExt as _};
 
 mod assertions;
 mod contracts;
 mod suites;
 mod utils;
-
-const DEFAULT_URL: &str = "http://127.0.0.1:8545";
-const DEFAULT_PK: &str = "0x8b3a350cf5c34c9194ca85829a2df0ec3153be0318b5e2d3348e872092edffba";
 
 fn init_tracing() {
     let env_filter =
@@ -22,15 +20,20 @@ fn init_tracing() {
         .init();
 }
 
+#[derive(Debug, Parser)]
+struct Cli {
+    #[clap(flatten)]
+    test_args: TestConfig,
+    #[clap(flatten)]
+    runner_config: e2e::TestRunnerConfiguration,
+}
+
 #[tokio::main]
 async fn main() {
     init_tracing();
+    let cli = Cli::parse();
 
-    let config = TestConfig {
-        rpc_url: DEFAULT_URL.to_string(),
-        main_pk: DEFAULT_PK.to_string(),
-    };
-    let mut tester = e2e::Tester::new(config);
+    let mut tester = e2e::TestRunner::new(cli.test_args).with_runner_config(cli.runner_config);
     tester.add_suite(suites::basic_evm::Test7702::evm());
     tester.add_suite(suites::basic_evm::Test7702::eravm());
 
