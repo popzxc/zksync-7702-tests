@@ -1,7 +1,6 @@
 pub(crate) mod era_vm {
     use IAccountCodeStorage::IAccountCodeStorageInstance;
     use IContractDeployer::IContractDeployerInstance;
-    use IEvmHashesStorage::IEvmHashesStorageInstance;
 
     alloy::sol!(
         #[sol(rpc)]
@@ -29,6 +28,7 @@ pub(crate) mod era_vm {
         #[derive(Debug)]
         interface IAccountCodeStorage {
             function getRawCodeHash(address _address) external view returns (bytes32 codeHash);
+            function getCodeHash(uint256 _address) external view returns (bytes32 codeHash);
         }
     );
 
@@ -65,15 +65,6 @@ pub(crate) mod era_vm {
             function getEvmCodeHash(bytes32 versionedBytecodeHash) external view returns (bytes32);
         }
     );
-
-    pub fn evm_hashes_storage(
-        provider: alloy::providers::DynProvider,
-    ) -> IEvmHashesStorageInstance<(), alloy::providers::DynProvider> {
-        let address = "0x0000000000000000000000000000000000008015"
-            .parse()
-            .unwrap();
-        IEvmHashesStorageInstance::new(address, provider)
-    }
 }
 
 pub(crate) mod evm {
