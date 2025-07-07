@@ -16,7 +16,7 @@ use alloy::{
     primitives::{Address, Bytes, U256, address, keccak256},
     providers::{DynProvider, Provider},
     rpc::types::TransactionRequest,
-    signers::{Signer, local::PrivateKeySigner},
+    signers::local::PrivateKeySigner,
     transports::RpcError,
 };
 
@@ -207,13 +207,11 @@ impl Test7702 {
             expected_bytecode_hash
         );
 
-        let evm_hashes_storage =
-            crate::contracts::era_vm::evm_hashes_storage(self.evm_provider.clone());
-        let evm_bytecode_hash = evm_hashes_storage
-            .getEvmCodeHash(versioned_bytecode_hash)
+        let evm_bytecode_hash = account_code_storage
+            .getCodeHash(U256::from_be_slice(self.alice.address().as_slice()))
             .call()
             .await?
-            ._0;
+            .codeHash;
         let expected_keccak_hash = keccak256(&expected_bytecode_hash[9..]);
         anyhow::ensure!(
             evm_bytecode_hash == expected_keccak_hash,
@@ -627,19 +625,13 @@ impl Test7702 {
             versioned_bytecode_hash,
         );
 
-        let mut expected_bytecode_hash = [0u8; 32];
-        expected_bytecode_hash[0..12]
-            .copy_from_slice(&hex::decode("030200170000000000EF0100").unwrap());
-        expected_bytecode_hash[12..32].copy_from_slice(delegation_address.as_slice());
-        let evm_hashes_storage =
-            crate::contracts::era_vm::evm_hashes_storage(self.evm_provider.clone());
-        let evm_bytecode_hash = evm_hashes_storage
-            .getEvmCodeHash(expected_bytecode_hash.into())
+        let evm_bytecode_hash = account_code_storage
+            .getCodeHash(U256::from_be_slice(self.alice.address().as_slice()))
             .call()
             .await?
-            ._0;
+            .codeHash;
         anyhow::ensure!(
-            evm_bytecode_hash == [0u8; 32],
+            evm_bytecode_hash == keccak256([]),
             "EVM bytecode hash does not match expected: got {:?}, expected empty",
             evm_bytecode_hash
         );
