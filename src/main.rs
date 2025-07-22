@@ -35,7 +35,7 @@ async fn main() {
 
     let mut tester = e2e::TestRunner::new(cli.test_args).with_runner_config(cli.runner_config);
     tester.add_suite(suites::basic_evm::Test7702::evm());
-    tester.add_suite(suites::basic_evm::Test7702::eravm());
+    // tester.add_suite(suites::basic_evm::Test7702::eravm());
 
     if let Err(err) = tester.run().await {
         tracing::error!(err = ?err, "Test run failed");

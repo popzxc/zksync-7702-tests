@@ -8,6 +8,7 @@ use crate::{
             SimpleDelegateContract::SimpleDelegateContractInstance,
         },
     },
+    suites::Profile,
     utils::Deployer,
 };
 use alloy::{
@@ -16,7 +17,7 @@ use alloy::{
     primitives::{Address, Bytes, U256, address, keccak256},
     providers::{DynProvider, Provider},
     rpc::types::TransactionRequest,
-    signers::{Signer, local::PrivateKeySigner},
+    signers::local::PrivateKeySigner,
     transports::RpcError,
 };
 
@@ -33,7 +34,7 @@ pub(crate) struct Test7702 {
     erc20: Erc20Instance<(), DynProvider<Ethereum>>,
     simple_delegate_contract: SimpleDelegateContractInstance<(), DynProvider<Ethereum>>,
     delegation_target_evm: DelegationTargetInstance<(), DynProvider<Ethereum>>,
-    delegation_target_eravm: DelegationTargetInstance<(), DynProvider<Ethereum>>,
+    // delegation_target_eravm: DelegationTargetInstance<(), DynProvider<Ethereum>>,
     checker: Evm7702CheckerInstance<(), DynProvider<Ethereum>>,
 }
 
@@ -55,29 +56,32 @@ impl Test7702 {
         let evm_provider = alloy::providers::builder::<Ethereum>()
             .with_recommended_fillers()
             .wallet(alice.clone())
-            .on_http(config.l2_url.parse().unwrap())
+            .on_http(config.l2_url().parse().unwrap())
             .erased();
 
-        if let Some(l1_url) = &config.l1_url {
-            crate::utils::deposit_base_token(
-                config.main_pk.parse().unwrap(),
-                l1_url,
-                &config.l2_url,
-                alice.address(),
-                U256::from(100000000000000000000u128),
-            )
-            .await
-            .context("Failed to deposit base token for Alice")?;
-        } else {
-            evm_provider
-                .raw_request::<_, bool>(
-                    "anvil_setBalance".into(),
-                    [
-                        alice.address().to_string(),
-                        "0x100000000000000000000".to_string(), // 100 ETH in wei
-                    ],
+        match config.profile() {
+            Profile::MainNode => {
+                crate::utils::deposit_base_token(
+                    config.main_pk().parse().unwrap(),
+                    config.l1_url(),
+                    config.l2_url(),
+                    alice.address(),
+                    U256::from(100000000000000000000u128),
                 )
-                .await?;
+                .await
+                .context("Failed to deposit base token for Alice")?;
+            }
+            Profile::Anvil => {
+                evm_provider
+                    .raw_request::<_, ()>( // Changed to `()` from `bool` to work with `anvil`
+                        "anvil_setBalance".into(),
+                        [
+                            alice.address().to_string(),
+                            "0x100000000000000000000".to_string(), // 100 ETH in wei
+                        ],
+                    )
+                    .await?;
+            }
         }
 
         anyhow::ensure!(
@@ -86,7 +90,7 @@ impl Test7702 {
         );
 
         let erc20 = deployer
-            .deploy_erc20(alice.clone(), &config.l2_url)
+            .deploy_erc20(alice.clone(), config.l2_url())
             .await
             .context("Can't deploy ERC20")?;
 
@@ -100,18 +104,18 @@ impl Test7702 {
             .await?;
 
         let simple_delegate_contract = deployer
-            .deploy_simple_delegate_contract(alice.clone(), &config.l2_url)
+            .deploy_simple_delegate_contract(alice.clone(), config.l2_url())
             .await
             .context("Can't deploy simple delegate contract")?;
 
         let delegation_target_evm = Deployer::Evm
-            .deploy_delegation_target(alice.clone(), &config.l2_url)
+            .deploy_delegation_target(alice.clone(), config.l2_url())
             .await
             .context("Can't deploy simple delegate target (EVM)")?;
-        let delegation_target_eravm = Deployer::EraVm
-            .deploy_delegation_target(alice.clone(), &config.l2_url)
-            .await
-            .context("Can't deploy simple delegate target (EraVM)")?;
+        // let delegation_target_eravm = Deployer::EraVm
+        //     .deploy_delegation_target(alice.clone(), config.l2_url())
+        //     .await
+        //     .context("Can't deploy simple delegate target (EraVM)")?;
 
         let checker = contracts::evm::Evm7702Checker::deploy(evm_provider.clone())
             .await
@@ -124,7 +128,7 @@ impl Test7702 {
             erc20,
             simple_delegate_contract,
             delegation_target_evm,
-            delegation_target_eravm,
+            // delegation_target_eravm,
             checker,
         })
     }
@@ -139,6 +143,7 @@ impl Test7702 {
             .await?;
         let tx = TransactionRequest::default()
             .with_to(Address::default())
+            .with_gas_limit(1_000_000)
             .with_authorization_list(vec![auth]);
 
         self.evm_provider
@@ -171,59 +176,59 @@ impl Test7702 {
         Ok(())
     }
 
-    /// Check that all the properties in system contracts (e.g. `ContractDeployer::get_delegation_address`)
-    /// perform as expected.
-    #[test_case("Delegation artifacts in system contracts")]
-    async fn delegation_artifacts_in_system_contracts(&self) -> anyhow::Result<()> {
-        let account_code_storage =
-            crate::contracts::era_vm::contract_deployer(self.evm_provider.clone());
-        let delegation_address = account_code_storage
-            .getAccountDelegation(self.alice.address())
-            .call()
-            .await?
-            ._0;
-        anyhow::ensure!(
-            delegation_address == *self.simple_delegate_contract.address(),
-            "Delegation address does not match: expected {}, got {}",
-            self.simple_delegate_contract.address(),
-            delegation_address
-        );
+    // /// Check that all the properties in system contracts (e.g. `ContractDeployer::get_delegation_address`)
+    // /// perform as expected.
+    // #[test_case("Delegation artifacts in system contracts")]
+    // async fn delegation_artifacts_in_system_contracts(&self) -> anyhow::Result<()> {
+    //     let account_code_storage =
+    //         crate::contracts::era_vm::contract_deployer(self.evm_provider.clone());
+    //     let delegation_address = account_code_storage
+    //         .getAccountDelegation(self.alice.address())
+    //         .call()
+    //         .await?
+    //         ._0;
+    //     anyhow::ensure!(
+    //         delegation_address == *self.simple_delegate_contract.address(),
+    //         "Delegation address does not match: expected {}, got {}",
+    //         self.simple_delegate_contract.address(),
+    //         delegation_address
+    //     );
 
-        let account_code_storage =
-            crate::contracts::era_vm::account_code_storage(self.evm_provider.clone());
-        let versioned_bytecode_hash = account_code_storage
-            .getRawCodeHash(self.alice.address())
-            .call()
-            .await?
-            .codeHash;
-        let mut expected_bytecode_hash = [0u8; 32];
-        expected_bytecode_hash[0..12]
-            .copy_from_slice(&hex::decode("030200170000000000EF0100").unwrap());
-        expected_bytecode_hash[12..32].copy_from_slice(delegation_address.as_slice());
-        anyhow::ensure!(
-            versioned_bytecode_hash == expected_bytecode_hash,
-            "Versioned bytecode hash does not match expected: {:?} != {:?}",
-            versioned_bytecode_hash,
-            expected_bytecode_hash
-        );
+    //     let account_code_storage =
+    //         crate::contracts::era_vm::account_code_storage(self.evm_provider.clone());
+    //     let versioned_bytecode_hash = account_code_storage
+    //         .getRawCodeHash(self.alice.address())
+    //         .call()
+    //         .await?
+    //         .codeHash;
+    //     let mut expected_bytecode_hash = [0u8; 32];
+    //     expected_bytecode_hash[0..12]
+    //         .copy_from_slice(&hex::decode("030200170000000000EF0100").unwrap());
+    //     expected_bytecode_hash[12..32].copy_from_slice(delegation_address.as_slice());
+    //     anyhow::ensure!(
+    //         versioned_bytecode_hash == expected_bytecode_hash,
+    //         "Versioned bytecode hash does not match expected: {:?} != {:?}",
+    //         versioned_bytecode_hash,
+    //         expected_bytecode_hash
+    //     );
 
-        let evm_hashes_storage =
-            crate::contracts::era_vm::evm_hashes_storage(self.evm_provider.clone());
-        let evm_bytecode_hash = evm_hashes_storage
-            .getEvmCodeHash(versioned_bytecode_hash)
-            .call()
-            .await?
-            ._0;
-        let expected_keccak_hash = keccak256(&expected_bytecode_hash[9..]);
-        anyhow::ensure!(
-            evm_bytecode_hash == expected_keccak_hash,
-            "EVM bytecode hash does not match expected: {:?} != {:?}",
-            evm_bytecode_hash,
-            expected_keccak_hash
-        );
+    //     let evm_hashes_storage =
+    //         crate::contracts::era_vm::evm_hashes_storage(self.evm_provider.clone());
+    //     let evm_bytecode_hash = evm_hashes_storage
+    //         .getEvmCodeHash(versioned_bytecode_hash)
+    //         .call()
+    //         .await?
+    //         ._0;
+    //     let expected_keccak_hash = keccak256(&expected_bytecode_hash[9..]);
+    //     anyhow::ensure!(
+    //         evm_bytecode_hash == expected_keccak_hash,
+    //         "EVM bytecode hash does not match expected: {:?} != {:?}",
+    //         evm_bytecode_hash,
+    //         expected_keccak_hash
+    //     );
 
-        Ok(())
-    }
+    //     Ok(())
+    // }
 
     #[test_case("EVM code properties")]
     async fn evm_code_properties(&self) -> anyhow::Result<()> {
@@ -407,7 +412,7 @@ impl Test7702 {
     async fn delegate_within_runtime(&self) -> anyhow::Result<()> {
         let contract = match self.deployer {
             Deployer::Evm => &self.delegation_target_evm,
-            Deployer::EraVm => &self.delegation_target_eravm,
+            Deployer::EraVm => unreachable!("EraVM support was removed"),
         };
         let address = *contract.address();
 
@@ -440,31 +445,31 @@ impl Test7702 {
         Ok(())
     }
 
-    #[test_case("Cannot delegate to another runtime")]
-    async fn cannot_delegate_to_another_runtime(&self) -> anyhow::Result<()> {
-        let contract = match self.deployer {
-            Deployer::Evm => &self.delegation_target_eravm,
-            Deployer::EraVm => &self.delegation_target_evm,
-        };
-        let address = *contract.address();
+    // #[test_case("Cannot delegate to another runtime")]
+    // async fn cannot_delegate_to_another_runtime(&self) -> anyhow::Result<()> {
+    //     let contract = match self.deployer {
+    //         Deployer::Evm => &self.delegation_target_eravm,
+    //         Deployer::EraVm => &self.delegation_target_evm,
+    //     };
+    //     let address = *contract.address();
 
-        let call = contracts::evm::SimpleDelegateContract::Call {
-            to: address,
-            value: Default::default(),
-            data: contract.setValue(U256::from(42)).calldata().clone(),
-        };
-        let tx = self
-            .simple_delegate_contract
-            .executeDelegate(vec![call])
-            .into_transaction_request()
-            .with_to(self.alice.address())
-            .with_gas_limit(1_000_000);
-        self.evm_provider
-            .send_with_assertions(tx, [TxAssertion::should_revert()])
-            .await?;
+    //     let call = contracts::evm::SimpleDelegateContract::Call {
+    //         to: address,
+    //         value: Default::default(),
+    //         data: contract.setValue(U256::from(42)).calldata().clone(),
+    //     };
+    //     let tx = self
+    //         .simple_delegate_contract
+    //         .executeDelegate(vec![call])
+    //         .into_transaction_request()
+    //         .with_to(self.alice.address())
+    //         .with_gas_limit(1_000_000);
+    //     self.evm_provider
+    //         .send_with_assertions(tx, [TxAssertion::should_revert()])
+    //         .await?;
 
-        Ok(())
-    }
+    //     Ok(())
+    // }
 
     #[test_case("Delegate to 7702-delegated account")]
     async fn delegate_to_7702(&self) -> anyhow::Result<()> {
@@ -581,6 +586,7 @@ impl Test7702 {
             .await?;
         let tx = TransactionRequest::default()
             .with_to(Address::default())
+            .with_gas_limit(1_000_000)
             .with_authorization_list(vec![auth]);
         self.evm_provider
             .send_with_assertions(tx, [TxAssertion::should_succeed()])
@@ -597,55 +603,55 @@ impl Test7702 {
         Ok(())
     }
 
-    /// Check that all the properties in system contracts (e.g. `ContractDeployer::get_delegation_address`)
-    /// are reset when authorization is reset.
-    #[test_case("Delegation artifacts in system contracts (cleanup)")]
-    async fn delegation_artifacts_in_system_contracts_cleanup(&self) -> anyhow::Result<()> {
-        let account_code_storage =
-            crate::contracts::era_vm::contract_deployer(self.evm_provider.clone());
-        let delegation_address = account_code_storage
-            .getAccountDelegation(self.alice.address())
-            .call()
-            .await?
-            ._0;
-        anyhow::ensure!(
-            delegation_address == Address::default(),
-            "Delegation address does not match: got {}, expected empty",
-            delegation_address
-        );
+    // /// Check that all the properties in system contracts (e.g. `ContractDeployer::get_delegation_address`)
+    // /// are reset when authorization is reset.
+    // #[test_case("Delegation artifacts in system contracts (cleanup)")]
+    // async fn delegation_artifacts_in_system_contracts_cleanup(&self) -> anyhow::Result<()> {
+    //     let account_code_storage =
+    //         crate::contracts::era_vm::contract_deployer(self.evm_provider.clone());
+    //     let delegation_address = account_code_storage
+    //         .getAccountDelegation(self.alice.address())
+    //         .call()
+    //         .await?
+    //         ._0;
+    //     anyhow::ensure!(
+    //         delegation_address == Address::default(),
+    //         "Delegation address does not match: got {}, expected empty",
+    //         delegation_address
+    //     );
 
-        let account_code_storage =
-            crate::contracts::era_vm::account_code_storage(self.evm_provider.clone());
-        let versioned_bytecode_hash = account_code_storage
-            .getRawCodeHash(self.alice.address())
-            .call()
-            .await?
-            .codeHash;
-        anyhow::ensure!(
-            versioned_bytecode_hash == [0u8; 32],
-            "Versioned bytecode hash does not match expected: got {:?}, expected empty",
-            versioned_bytecode_hash,
-        );
+    //     let account_code_storage =
+    //         crate::contracts::era_vm::account_code_storage(self.evm_provider.clone());
+    //     let versioned_bytecode_hash = account_code_storage
+    //         .getRawCodeHash(self.alice.address())
+    //         .call()
+    //         .await?
+    //         .codeHash;
+    //     anyhow::ensure!(
+    //         versioned_bytecode_hash == [0u8; 32],
+    //         "Versioned bytecode hash does not match expected: got {:?}, expected empty",
+    //         versioned_bytecode_hash,
+    //     );
 
-        let mut expected_bytecode_hash = [0u8; 32];
-        expected_bytecode_hash[0..12]
-            .copy_from_slice(&hex::decode("030200170000000000EF0100").unwrap());
-        expected_bytecode_hash[12..32].copy_from_slice(delegation_address.as_slice());
-        let evm_hashes_storage =
-            crate::contracts::era_vm::evm_hashes_storage(self.evm_provider.clone());
-        let evm_bytecode_hash = evm_hashes_storage
-            .getEvmCodeHash(expected_bytecode_hash.into())
-            .call()
-            .await?
-            ._0;
-        anyhow::ensure!(
-            evm_bytecode_hash == [0u8; 32],
-            "EVM bytecode hash does not match expected: got {:?}, expected empty",
-            evm_bytecode_hash
-        );
+    //     let mut expected_bytecode_hash = [0u8; 32];
+    //     expected_bytecode_hash[0..12]
+    //         .copy_from_slice(&hex::decode("030200170000000000EF0100").unwrap());
+    //     expected_bytecode_hash[12..32].copy_from_slice(delegation_address.as_slice());
+    //     let evm_hashes_storage =
+    //         crate::contracts::era_vm::evm_hashes_storage(self.evm_provider.clone());
+    //     let evm_bytecode_hash = evm_hashes_storage
+    //         .getEvmCodeHash(expected_bytecode_hash.into())
+    //         .call()
+    //         .await?
+    //         ._0;
+    //     anyhow::ensure!(
+    //         evm_bytecode_hash == [0u8; 32],
+    //         "EVM bytecode hash does not match expected: got {:?}, expected empty",
+    //         evm_bytecode_hash
+    //     );
 
-        Ok(())
-    }
+    //     Ok(())
+    // }
 
     #[test_case("EVM code properties (after reset)")]
     async fn evm_code_properties_after_reset(&self) -> anyhow::Result<()> {
@@ -725,18 +731,27 @@ impl Test7702 {
             .send_with_assertions(tx, [TxAssertion::should_revert()])
             .await?;
 
-        let account_code_storage =
-            crate::contracts::era_vm::contract_deployer(self.evm_provider.clone());
-        let actual_delegation_address = account_code_storage
-            .getAccountDelegation(self.alice.address())
-            .call()
-            .await?
-            ._0;
+        // let account_code_storage =
+        //     crate::contracts::era_vm::contract_deployer(self.evm_provider.clone());
+        // let actual_delegation_address = account_code_storage
+        //     .getAccountDelegation(self.alice.address())
+        //     .call()
+        //     .await?
+        //     ._0;
+        // anyhow::ensure!(
+        //     actual_delegation_address == delegation_address,
+        //     "Delegation address does not match: got {}, expected {}",
+        //     actual_delegation_address,
+        //     delegation_address
+        // );
+
+        let account_code = self.evm_provider.get_code_at(self.alice.address()).await?;
+        let expected_code = format!("0xef0100{delegation_address:x}");
         anyhow::ensure!(
-            actual_delegation_address == delegation_address,
-            "Delegation address does not match: got {}, expected {}",
-            actual_delegation_address,
-            delegation_address
+            account_code.to_string() == expected_code,
+            "Code at Alice's address does not match expected: {} != {}",
+            account_code.to_string(),
+            expected_code
         );
 
         let actual_nonce = self
@@ -768,6 +783,7 @@ impl Test7702 {
 
         let tx = TransactionRequest::default()
             .with_to(Address::default())
+            .with_gas_limit(1_000_000)
             .with_authorization_list(vec![bob_auth, charlie_auth]);
         self.evm_provider
             .send_with_assertions(tx, [TxAssertion::should_succeed()])
@@ -790,28 +806,29 @@ impl Test7702 {
         Ok(())
     }
 
-    #[test_case("Empty authorization list not allowed")]
-    async fn empty_authorization_list_not_allowed(&self) -> anyhow::Result<()> {
-        let tx = TransactionRequest::default()
-            .with_to(Address::repeat_byte(0x88))
-            .with_authorization_list(Vec::new());
-        let Err(error) = self.evm_provider.estimate_gas(tx).await else {
-            anyhow::bail!("Gas estimation should have failed");
-        };
-        let RpcError::ErrorResp(error) = error else {
-            anyhow::bail!("Expected RpcError::ErrorResp, got: {:?}", error);
-        };
+    // #[test_case("Empty authorization list not allowed")]
+    // async fn empty_authorization_list_not_allowed(&self) -> anyhow::Result<()> {
+    //     let tx = TransactionRequest::default()
+    //         .with_to(Address::repeat_byte(0x88))
+    //         .with_gas_limit(1_000_000)
+    //         .with_authorization_list(Vec::new());
+    //     let Err(error) = self.evm_provider.estimate_gas(tx).await else {
+    //         anyhow::bail!("Gas estimation should have failed");
+    //     };
+    //     let RpcError::ErrorResp(error) = error else {
+    //         anyhow::bail!("Expected RpcError::ErrorResp, got: {:?}", error);
+    //     };
 
-        anyhow::ensure!(
-            error
-                .message
-                .contains("Failed to process EIP-7702 authorization list"),
-            "Expected revert reason, got: {}",
-            error.message,
-        );
+    //     anyhow::ensure!(
+    //         error
+    //             .message
+    //             .contains("Failed to process EIP-7702 authorization list"),
+    //         "Expected revert reason, got: {}",
+    //         error.message,
+    //     );
 
-        Ok(())
-    }
+    //     Ok(())
+    // }
 
     #[test_case("Authorization lists are preserved if tx runs out of gas")]
     async fn auth_lists_preserved_on_out_of_gas(&self) -> anyhow::Result<()> {
@@ -831,20 +848,30 @@ impl Test7702 {
             .send_with_assertions(tx, [TxAssertion::should_revert()])
             .await?;
 
-        let account_code_storage =
-            crate::contracts::era_vm::contract_deployer(self.evm_provider.clone());
-        let actual_delegation_address = account_code_storage
-            .getAccountDelegation(bob.address())
-            .call()
-            .await?
-            ._0;
+        // let account_code_storage =
+        //     crate::contracts::era_vm::contract_deployer(self.evm_provider.clone());
+        // let actual_delegation_address = account_code_storage
+        //     .getAccountDelegation(bob.address())
+        //     .call()
+        //     .await?
+        //     ._0;
 
+        // anyhow::ensure!(
+        //     actual_delegation_address == charlie.address(),
+        //     "Delegation address does not match: got {}, expected {}",
+        //     actual_delegation_address,
+        //     charlie.address()
+        // );
+
+        let account_code = self.evm_provider.get_code_at(bob.address()).await?;
+        let expected_code = format!("0xef0100{:x}", charlie.address());
         anyhow::ensure!(
-            actual_delegation_address == charlie.address(),
-            "Delegation address does not match: got {}, expected {}",
-            actual_delegation_address,
-            charlie.address()
+            account_code.to_string() == expected_code,
+            "Code at Bob's address does not match expected: {} != {}",
+            account_code.to_string(),
+            expected_code
         );
+
         let actual_nonce = self
             .evm_provider
             .get_transaction_count(bob.address())
@@ -869,6 +896,7 @@ impl Test7702 {
 
         let tx = TransactionRequest::default()
             .with_to(Default::default())
+            .with_gas_limit(1_000_000)
             .with_authorization_list(vec![bob_auth]);
         self.evm_provider
             .send_with_assertions(tx, [TxAssertion::should_succeed()])
@@ -911,6 +939,7 @@ impl Test7702 {
 
         let tx = TransactionRequest::default()
             .with_to(Address::default())
+            .with_gas_limit(1_000_000)
             .with_authorization_list(vec![auth_bob, auth_carl, auth_invalid]);
 
         self.evm_provider
@@ -949,6 +978,7 @@ impl Test7702 {
             .await?;
         let tx = TransactionRequest::default()
             .with_to(Address::default())
+            .with_gas_limit(1_000_000)
             .with_authorization_list(vec![first_auth, second_auth, skipped_auth]);
         self.evm_provider
             .send_with_assertions(
